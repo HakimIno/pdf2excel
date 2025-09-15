@@ -124,7 +124,8 @@ class IntelligentPDFReader:
             # Analyze cell formatting
             cell_formats = self._analyze_table_formatting(page, table, bbox)
             
-            tables.append({
+            # Enhanced table analysis
+            table_info = {
                 'data': table_data,
                 'bbox': bbox,
                 'x': bbox[0],
@@ -132,8 +133,14 @@ class IntelligentPDFReader:
                 'width': bbox[2] - bbox[0],
                 'height': bbox[3] - bbox[1],
                 'cell_formats': cell_formats,
-                'table_type': self._classify_table(table_data)
-            })
+                'table_type': self._classify_table(table_data),
+                'num_rows': len(table_data),
+                'num_cols': len(table_data[0]) if table_data else 0,
+                'has_headers': self._detect_headers(table_data),
+                'complexity': self._assess_table_complexity(table_data)
+            }
+            
+            tables.append(table_info)
             
         return tables
         
@@ -187,14 +194,24 @@ class IntelligentPDFReader:
         return shapes
         
     def _extract_colors(self, page) -> Dict[str, Any]:
-        """Extract color scheme from the page"""
+        """Extract comprehensive color scheme from the page"""
         colors = {
             'background_colors': [],
             'text_colors': [],
-            'dominant_colors': []
+            'dominant_colors': [],
+            'border_colors': [],  # New: specifically track border colors
+            'table_colors': {
+                'header_bg': None,
+                'header_text': None,
+                'data_bg_primary': None,
+                'data_bg_alternate': None,
+                'data_text': None,
+                'border_color': None
+            }
         }
         
-        # Extract colors from text
+        # Extract colors from text with frequency tracking
+        text_color_freq = {}
         blocks = page.get_text("dict")
         for block in blocks.get("blocks", []):
             if "lines" not in block:
@@ -202,21 +219,215 @@ class IntelligentPDFReader:
             for line in block["lines"]:
                 for span in line["spans"]:
                     color = span.get("color")
-                    if color and color not in colors['text_colors']:
-                        colors['text_colors'].append(color)
+                    if color:
+                        # Convert to hex format for consistency
+                        hex_color = self._convert_color_to_hex(color)
+                        if hex_color:
+                            text_color_freq[hex_color] = text_color_freq.get(hex_color, 0) + 1
+                            if hex_color not in colors['text_colors']:
+                                colors['text_colors'].append(hex_color)
                         
-        # Extract colors from shapes
+        # Extract colors from shapes and drawings (including borders)
+        bg_color_freq = {}
+        border_color_freq = {}
         drawings = page.get_drawings()
         for drawing in drawings:
             fill_color = drawing.get('fill')
             stroke_color = drawing.get('stroke', {}).get('color')
+            stroke_width = drawing.get('width', 0)
             
-            if fill_color and fill_color not in colors['background_colors']:
-                colors['background_colors'].append(fill_color)
-            if stroke_color and stroke_color not in colors['text_colors']:
-                colors['text_colors'].append(stroke_color)
+            if fill_color:
+                hex_fill = self._convert_color_to_hex(fill_color)
+                if hex_fill:
+                    bg_color_freq[hex_fill] = bg_color_freq.get(hex_fill, 0) + 1
+                    if hex_fill not in colors['background_colors']:
+                        colors['background_colors'].append(hex_fill)
+                        
+            if stroke_color:
+                hex_stroke = self._convert_color_to_hex(stroke_color)
+                if hex_stroke:
+                    # Track border colors separately
+                    border_color_freq[hex_stroke] = border_color_freq.get(hex_stroke, 0) + 1
+                    if hex_stroke not in colors['border_colors']:
+                        colors['border_colors'].append(hex_stroke)
+                    if hex_stroke not in colors['text_colors']:
+                        colors['text_colors'].append(hex_stroke)
+        
+        # Determine dominant colors
+        if text_color_freq:
+            colors['dominant_colors'] = sorted(text_color_freq.items(), key=lambda x: x[1], reverse=True)[:3]
+        
+        # Smart color assignment for tables (including border detection)
+        colors['table_colors'] = self._determine_table_colors(colors, text_color_freq, bg_color_freq, border_color_freq)
                 
         return colors
+    
+    def _convert_color_to_hex(self, color) -> Optional[str]:
+        """Convert various color formats to hex"""
+        try:
+            if isinstance(color, int):
+                # Convert RGB integer to hex
+                return f"FF{color:06X}"
+            elif isinstance(color, (list, tuple)) and len(color) >= 3:
+                # Convert RGB list/tuple to hex
+                r, g, b = int(color[0] * 255), int(color[1] * 255), int(color[2] * 255)
+                return f"FF{r:02X}{g:02X}{b:02X}"
+            elif isinstance(color, str) and color.startswith('#'):
+                # Already hex format, ensure FF prefix for alpha
+                return f"FF{color[1:]}" if len(color) == 7 else color
+            elif isinstance(color, str) and len(color) == 6:
+                # Hex without alpha
+                return f"FF{color}"
+            return None
+        except:
+            return None
+    
+    def _determine_table_colors(self, colors: Dict, text_freq: Dict, bg_freq: Dict, border_freq: Dict = None) -> Dict:
+        """Determine table colors based on extracted colors - only use colors that exist in PDF"""
+        # Start with no colors (transparent/white background)
+        table_colors = {
+            'header_bg': None,           # No background color
+            'header_text': None,         # Default text color
+            'data_bg_primary': None,     # No background color
+            'data_bg_alternate': None,   # No alternating color
+            'data_text': None,           # Default text color
+            'border_color': None         # No border color
+        }
+        
+        # Use colors that exist in PDF - prioritize professional table appearance
+        if bg_freq:
+            # Find the most suitable header background color from PDF
+            for bg_color, freq in sorted(bg_freq.items(), key=lambda x: x[1], reverse=True):
+                if self._is_suitable_header_color(bg_color):
+                    table_colors['header_bg'] = bg_color
+                    break
+            
+            # If no suitable header color found, use light gray for professional appearance
+            if not table_colors['header_bg']:
+                table_colors['header_bg'] = 'FFE5E5E5'  # Light gray for headers
+            
+            # Only use alternating colors if they're very light (to maintain border visibility)
+            very_light_colors = [color for color in bg_freq.keys() if self._get_color_brightness(color) > 240]
+            if very_light_colors:
+                lightest = max(very_light_colors, key=lambda x: self._get_color_brightness(x))
+                table_colors['data_bg_alternate'] = lightest
+        
+        # Use text colors that exist in PDF
+        if text_freq:
+            # Find darkest readable text color from PDF
+            dark_text_colors = [color for color in text_freq.keys() if self._get_color_brightness(color) < 128]
+            if dark_text_colors:
+                darkest = min(dark_text_colors, key=lambda x: self._get_color_brightness(x))
+                table_colors['data_text'] = darkest
+        
+        # Enhanced border detection - use actual border colors from PDF
+        if border_freq:
+            # Find the most common border color (likely table borders)
+            for border_color, freq in sorted(border_freq.items(), key=lambda x: x[1], reverse=True):
+                # Prefer dark colors for borders (black, dark gray)
+                if self._get_color_brightness(border_color) < 100:
+                    table_colors['border_color'] = border_color
+                    break
+            # If no dark border found, use black for better visibility
+            if not table_colors['border_color']:
+                table_colors['border_color'] = 'FF000000'  # Black borders
+        elif table_colors['header_bg']:
+            # Fallback: create border color from header background
+            table_colors['border_color'] = self._create_border_color(table_colors['header_bg'])
+        else:
+            # Default: use black borders for better visibility
+            table_colors['border_color'] = 'FF000000'  # Black borders
+        
+        # Only set header text color if we have a header background
+        if table_colors['header_bg']:
+            if self._is_dark_color(table_colors['header_bg']):
+                table_colors['header_text'] = 'FFFFFFFF'  # White on dark
+            else:
+                table_colors['header_text'] = 'FF000000'  # Black on light
+        
+        return table_colors
+    
+    def _is_suitable_header_color(self, hex_color: str) -> bool:
+        """Check if color is suitable for table headers"""
+        try:
+            brightness = self._get_color_brightness(hex_color)
+            # Good for headers: not too dark, not too light
+            return 40 <= brightness <= 180
+        except:
+            return False
+    
+    def _create_border_color(self, base_color: str) -> str:
+        """Create a subtle border color based on the base color"""
+        try:
+            if len(base_color) >= 8:
+                r = int(base_color[2:4], 16)
+                g = int(base_color[4:6], 16)
+                b = int(base_color[6:8], 16)
+                
+                # Create a lighter version for borders
+                r = min(255, r + 40)
+                g = min(255, g + 40)
+                b = min(255, b + 40)
+                
+                return f"FF{r:02X}{g:02X}{b:02X}"
+        except:
+            pass
+        return None  # No border color if can't create from base color
+    
+    def _is_dark_color(self, hex_color: str) -> bool:
+        """Check if color is dark"""
+        try:
+            if len(hex_color) >= 8:
+                r = int(hex_color[2:4], 16)
+                g = int(hex_color[4:6], 16)  
+                b = int(hex_color[6:8], 16)
+                brightness = (r * 299 + g * 587 + b * 114) / 1000
+                return brightness < 128
+        except:
+            pass
+        return False
+    
+    def _get_color_brightness(self, hex_color: str) -> int:
+        """Get color brightness value"""
+        try:
+            if len(hex_color) >= 8:
+                r = int(hex_color[2:4], 16)
+                g = int(hex_color[4:6], 16)
+                b = int(hex_color[6:8], 16)
+                return int((r * 299 + g * 587 + b * 114) / 1000)
+        except:
+            pass
+        return 128
+    
+    def _darken_color(self, hex_color: str, factor: float = 0.7) -> str:
+        """Darken a color by factor"""
+        try:
+            if len(hex_color) >= 8:
+                r = int(hex_color[2:4], 16)
+                g = int(hex_color[4:6], 16)
+                b = int(hex_color[6:8], 16)
+                r = int(r * factor)
+                g = int(g * factor)
+                b = int(b * factor)
+                return f"FF{r:02X}{g:02X}{b:02X}"
+        except:
+            pass
+        return hex_color
+    
+    def _lighten_color(self, hex_color: str, factor: float = 0.9) -> str:
+        """Lighten a color by factor"""
+        try:
+            if len(hex_color) >= 8:
+                r = int(hex_color[2:4], 16)
+                g = int(hex_color[4:6], 16)
+                b = int(hex_color[6:8], 16)
+                r = int(r + (255 - r) * (1 - factor))
+                g = int(g + (255 - g) * (1 - factor))
+                b = int(b + (255 - b) * (1 - factor))
+                return f"FF{r:02X}{g:02X}{b:02X}"
+        except:
+            pass
+        return hex_color
         
     def _extract_fonts(self, page) -> Dict[str, Any]:
         """Extract font information"""
@@ -297,8 +508,46 @@ class IntelligentPDFReader:
             return 'deductions'
         elif any(word in header_text for word in ['SUMMARY', 'TOTAL', 'GROSS', 'NET']):
             return 'summary'
+        elif any(word in header_text for word in ['EQUITY', 'SHAREHOLDER', 'CAPITAL', 'STOCK']):
+            return 'financial_statement'
+        elif any(word in header_text for word in ['BALANCE', 'ASSET', 'LIABILITY']):
+            return 'balance_sheet'
         else:
             return 'data'
+    
+    def _detect_headers(self, table_data: List[List]) -> bool:
+        """Detect if table has headers"""
+        if not table_data or len(table_data) < 2:
+            return False
+            
+        # Check if first row looks like headers (contains text, not numbers)
+        first_row = table_data[0]
+        text_count = sum(1 for cell in first_row if cell and not self._is_numeric(str(cell)))
+        
+        # If more than half the cells in first row are text, likely headers
+        return text_count > len(first_row) / 2
+    
+    def _assess_table_complexity(self, table_data: List[List]) -> str:
+        """Assess table complexity level"""
+        if not table_data:
+            return 'simple'
+            
+        num_rows = len(table_data)
+        num_cols = len(table_data[0]) if table_data else 0
+        
+        # Count merged cells or complex structures
+        complex_cells = 0
+        for row in table_data:
+            for cell in row:
+                if cell and len(str(cell)) > 20:  # Long text might indicate merged cells
+                    complex_cells += 1
+        
+        if num_cols > 8 or num_rows > 20 or complex_cells > num_rows * num_cols * 0.3:
+            return 'complex'
+        elif num_cols > 4 or num_rows > 10:
+            return 'medium'
+        else:
+            return 'simple'
             
     def _analyze_table_formatting(self, page, table, bbox) -> List[List[Dict]]:
         """Analyze formatting for each table cell"""
@@ -357,9 +606,28 @@ class IntelligentPDFReader:
                 
     def _setup_worksheet(self, ws, layout_info: Dict) -> None:
         """Setup worksheet with appropriate dimensions based on content"""
-        # Optimize column widths based on typical payroll statement layout
-        # A-B: Labels/Names (wider), C-D: Values, E-F: Labels, G-H: Values
-        column_widths = [20, 15, 12, 12, 20, 15, 12, 12]
+        # Analyze table complexity to set optimal column widths
+        tables = layout_info.get('tables', [])
+        max_complexity = 'simple'
+        
+        for table in tables:
+            complexity = table.get('complexity', 'simple')
+            if complexity == 'complex':
+                max_complexity = 'complex'
+                break
+            elif complexity == 'medium' and max_complexity == 'simple':
+                max_complexity = 'medium'
+        
+        # Set column widths based on complexity - optimized for professional table layout
+        if max_complexity == 'complex':
+            # For complex tables (like payroll statements), use optimized widths
+            column_widths = [25, 30, 15, 20, 20, 20, 20, 20]  # Optimized for payroll statements
+        elif max_complexity == 'medium':
+            # For medium complexity, use balanced widths
+            column_widths = [20, 25, 15, 18, 18, 18, 18, 18]
+        else:
+            # For simple tables, use uniform widths
+            column_widths = [18, 20, 15, 16, 16, 16, 16, 16]
         
         for i, width in enumerate(column_widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = width
@@ -388,11 +656,24 @@ class IntelligentPDFReader:
                                        Alignment(horizontal='center', vertical='center'))
                 
             elif block_type == 'section_header':
-                # Section headers span full width
+                # Section headers span full width - use extracted colors only if they exist
+                page_colors = layout_info.get('colors', {}).get('table_colors', {})
+                header_text_color = page_colors.get('header_text')
+                header_bg_color = page_colors.get('header_bg')
+                
+                # Only apply colors if they exist in PDF
+                font = Font(size=12, bold=True)
+                if header_text_color:
+                    font = Font(size=12, bold=True, color=header_text_color)
+                
+                fill = None
+                if header_bg_color:
+                    fill = PatternFill(start_color=header_bg_color, end_color=header_bg_color, fill_type='solid')
+                
                 self._create_merged_cell(ws, start_row, 'A', 'H', text,
-                                       Font(size=12, bold=True, color='FFFFFFFF'),
+                                       font,
                                        Alignment(horizontal='center', vertical='center'),
-                                       PatternFill(start_color='FF4472C4', end_color='FF4472C4', fill_type='solid'))
+                                       fill)
                 
             elif block_type == 'label':
                 # Labels positioned based on X coordinate
@@ -470,23 +751,46 @@ class IntelligentPDFReader:
             
         current_row = start_row
         
-        # Create table with appropriate styling
+        # Create table with appropriate styling using extracted colors
+        page_colors = layout_info.get('colors', {}).get('table_colors', {})
+        
         for row_idx, row_data in enumerate(table_data):
             for col_idx, cell_value in enumerate(row_data[:6], 1):
                 cell = ws.cell(row=current_row, column=col_idx, value=str(cell_value) if cell_value else "")
                 
                 if row_idx == 0:  # Header row
-                    cell.font = Font(size=10, bold=True, color='FFFFFFFF')
-                    cell.fill = PatternFill(start_color='FF4472C4', end_color='FF4472C4', fill_type='solid')
+                    header_text_color = page_colors.get('header_text')
+                    header_bg_color = page_colors.get('header_bg')
+                    
+                    # Only apply colors if they exist in the PDF
+                    if header_text_color:
+                        cell.font = Font(size=10, bold=True, color=header_text_color)
+                    else:
+                        cell.font = Font(size=10, bold=True)  # Default black text
+                        
+                    if header_bg_color:
+                        cell.fill = PatternFill(start_color=header_bg_color, end_color=header_bg_color, fill_type='solid')
+                    # No fill if no background color in PDF
+                    
                     cell.alignment = Alignment(horizontal='center', vertical='center')
                 else:  # Data row
-                    cell.font = Font(size=10)
+                    data_text_color = page_colors.get('data_text')
                     
-                    # Alternating colors
-                    if row_idx % 2 == 0:
-                        cell.fill = PatternFill(start_color='FFFFFFFF', end_color='FFFFFFFF', fill_type='solid')
+                    # Only apply text color if it exists in PDF
+                    if data_text_color:
+                        cell.font = Font(size=10, color=data_text_color)
                     else:
-                        cell.fill = PatternFill(start_color='FFF8F8F8', end_color='FFF8F8F8', fill_type='solid')
+                        cell.font = Font(size=10)  # Default black text
+                    
+                    # Only apply alternating colors if they exist in PDF
+                    if row_idx % 2 == 0:
+                        primary_bg = page_colors.get('data_bg_primary')
+                        if primary_bg:
+                            cell.fill = PatternFill(start_color=primary_bg, end_color=primary_bg, fill_type='solid')
+                    else:
+                        alternate_bg = page_colors.get('data_bg_alternate')
+                        if alternate_bg:
+                            cell.fill = PatternFill(start_color=alternate_bg, end_color=alternate_bg, fill_type='solid')
                         
                     # Smart alignment
                     if self._is_numeric(str(cell_value)):
@@ -494,13 +798,15 @@ class IntelligentPDFReader:
                     else:
                         cell.alignment = Alignment(horizontal='left', vertical='center')
                         
-                # Borders
-                cell.border = Border(
-                    left=Side(style='thin', color='FFE0E0E0'),
-                    right=Side(style='thin', color='FFE0E0E0'),
-                    top=Side(style='thin', color='FFE0E0E0'),
-                    bottom=Side(style='thin', color='FFE0E0E0')
-                )
+                # Only add borders if border color exists in PDF
+                border_color = page_colors.get('border_color')
+                if border_color:
+                    cell.border = Border(
+                        left=Side(style='thin', color=border_color),
+                        right=Side(style='thin', color=border_color),
+                        top=Side(style='thin', color=border_color),
+                        bottom=Side(style='thin', color=border_color)
+                    )
                 
             current_row += 1
             
@@ -569,11 +875,11 @@ class IntelligentPDFReader:
             
         elif row_type == 'section_header':
             # Handle section headers like "CURRENT EARNINGS"
-            self._create_section_header_row(ws, row_elements, excel_row)
+            self._create_section_header_row(ws, row_elements, excel_row, layout_info)
             
         elif row_type == 'table_header':
             # Handle table headers like "EARNING TYPE | HOURS | PAYMENT"
-            self._create_table_header_row(ws, row_elements, excel_row, page_width)
+            self._create_table_header_row(ws, row_elements, excel_row, page_width, layout_info)
             
         elif row_type == 'data_row':
             # Handle data rows like "Regular Pay | 0.00 | $ -"
@@ -661,57 +967,140 @@ class IntelligentPDFReader:
             ws[f'A{row}'].value = elem['text']
             ws[f'A{row}'].font = Font(size=10, bold=True)
             
-    def _create_section_header_row(self, ws, elements: List[Dict], row: int):
+    def _create_section_header_row(self, ws, elements: List[Dict], row: int, layout_info: Dict = None):
         """Create section header row like 'CURRENT EARNINGS'"""
         elem = elements[0]
+        
+        # Use extracted colors only if they exist in PDF
+        font = Font(size=12, bold=True)
+        fill = None
+        
+        if layout_info:
+            page_colors = layout_info.get('colors', {}).get('table_colors', {})
+            header_text_color = page_colors.get('header_text')
+            header_bg_color = page_colors.get('header_bg')
+            
+            if header_text_color:
+                font = Font(size=12, bold=True, color=header_text_color)
+            if header_bg_color:
+                fill = PatternFill(start_color=header_bg_color, end_color=header_bg_color, fill_type='solid')
+            
         self._create_merged_cell(ws, row, 'A', 'H', elem['text'],
-                               Font(size=12, bold=True, color='FFFFFFFF'),
+                               font,
                                Alignment(horizontal='center', vertical='center'),
-                               PatternFill(start_color='FF4472C4', end_color='FF4472C4', fill_type='solid'))
+                               fill)
                                
-    def _create_table_header_row(self, ws, elements: List[Dict], row: int, page_width: float):
+    def _create_table_header_row(self, ws, elements: List[Dict], row: int, page_width: float, layout_info: Dict = None):
         """Create table header row like 'EARNING TYPE | HOURS | PAYMENT'"""
-        # Distribute elements across columns
-        cols_per_element = 8 // len(elements) if elements else 1
+        # Distribute elements across columns efficiently to use full width
+        num_elements = len(elements) if elements else 1
+        cols_per_element = max(1, 8 // num_elements)  # Ensure at least 1 column per element
+        
+        # Use extracted colors only if they exist in PDF
+        font = Font(size=10, bold=True)
+        fill = None
+        
+        if layout_info:
+            page_colors = layout_info.get('colors', {}).get('table_colors', {})
+            header_text_color = page_colors.get('header_text')
+            header_bg_color = page_colors.get('header_bg')
+            
+            if header_text_color:
+                font = Font(size=10, bold=True, color=header_text_color)
+            if header_bg_color:
+                fill = PatternFill(start_color=header_bg_color, end_color=header_bg_color, fill_type='solid')
+            
+        # Use the same efficient column distribution as _create_clean_table
+        num_cols = len(elements)
+        if num_cols == 1:
+            col_positions = [(1, 8)]  # A-H
+        elif num_cols == 2:
+            col_positions = [(1, 4), (5, 8)]  # A-D, E-H
+        elif num_cols == 3:
+            col_positions = [(1, 2), (3, 5), (6, 8)]  # A-B, C-E, F-H
+        elif num_cols == 4:
+            col_positions = [(1, 2), (3, 4), (5, 6), (7, 8)]  # A-B, C-D, E-F, G-H
+        elif num_cols == 5:
+            col_positions = [(1, 1), (2, 3), (4, 5), (6, 7), (8, 8)]  # A, B-C, D-E, F-G, H
+        elif num_cols == 6:
+            col_positions = [(1, 1), (2, 2), (3, 4), (5, 6), (7, 7), (8, 8)]  # A, B, C-D, E-F, G, H
+        elif num_cols == 7:
+            col_positions = [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 8)]  # A, B, C, D, E, F, G-H
+        else:
+            col_positions = [(i+1, i+1) for i in range(min(num_cols, 8))]
         
         for i, elem in enumerate(elements):
-            start_col = i * cols_per_element + 1
-            end_col = min(start_col + cols_per_element - 1, 8)
-            
+            if i >= len(col_positions):
+                break
+                
+            start_col, end_col = col_positions[i]
             start_letter = get_column_letter(start_col)
             end_letter = get_column_letter(end_col)
             
             if start_col == end_col:
                 # Single column
-                ws[f'{start_letter}{row}'].value = elem['text']
-                ws[f'{start_letter}{row}'].font = Font(size=10, bold=True, color='FFFFFFFF')
-                ws[f'{start_letter}{row}'].fill = PatternFill(start_color='FF4472C4', end_color='FF4472C4', fill_type='solid')
-                ws[f'{start_letter}{row}'].alignment = Alignment(horizontal='center', vertical='center')
+                cell = ws[f'{start_letter}{row}']
+                cell.value = elem['text']
+                cell.font = font
+                if fill:
+                    cell.fill = fill
+                cell.alignment = Alignment(horizontal='center', vertical='center')
             else:
                 # Merged cells
                 self._create_merged_cell(ws, row, start_letter, end_letter, elem['text'],
-                                       Font(size=10, bold=True, color='FFFFFFFF'),
+                                       font,
                                        Alignment(horizontal='center', vertical='center'),
-                                       PatternFill(start_color='FF4472C4', end_color='FF4472C4', fill_type='solid'))
+                                       fill)
                                        
     def _create_data_row(self, ws, elements: List[Dict], row: int, page_width: float):
         """Create data row like 'Regular Pay | 0.00 | $ -'"""
-        # Distribute elements across columns similar to table header
-        cols_per_element = 8 // len(elements) if elements else 1
+        # Distribute elements across columns efficiently to use full width
+        num_elements = len(elements) if elements else 1
+        cols_per_element = max(1, 8 // num_elements)  # Ensure at least 1 column per element
+        
+        # Use the same efficient column distribution as _create_clean_table
+        num_cols = len(elements)
+        if num_cols == 1:
+            col_positions = [(1, 8)]  # A-H
+        elif num_cols == 2:
+            col_positions = [(1, 4), (5, 8)]  # A-D, E-H
+        elif num_cols == 3:
+            col_positions = [(1, 2), (3, 5), (6, 8)]  # A-B, C-E, F-H
+        elif num_cols == 4:
+            col_positions = [(1, 2), (3, 4), (5, 6), (7, 8)]  # A-B, C-D, E-F, G-H
+        elif num_cols == 5:
+            col_positions = [(1, 1), (2, 3), (4, 5), (6, 7), (8, 8)]  # A, B-C, D-E, F-G, H
+        elif num_cols == 6:
+            col_positions = [(1, 1), (2, 2), (3, 4), (5, 6), (7, 7), (8, 8)]  # A, B, C-D, E-F, G, H
+        elif num_cols == 7:
+            col_positions = [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 8)]  # A, B, C, D, E, F, G-H
+        else:
+            col_positions = [(i+1, i+1) for i in range(min(num_cols, 8))]
         
         for i, elem in enumerate(elements):
-            start_col = i * cols_per_element + 1
-            col_letter = get_column_letter(start_col)
+            if i >= len(col_positions):
+                break
+                
+            start_col, end_col = col_positions[i]
+            start_letter = get_column_letter(start_col)
+            end_letter = get_column_letter(end_col)
             
-            cell = ws[f'{col_letter}{row}']
-            cell.value = elem['text']
-            cell.font = Font(size=10)
-            
-            # Right align if numeric
-            if self._is_numeric(elem['text']) or '$' in elem['text']:
-                cell.alignment = Alignment(horizontal='right', vertical='center')
+            if start_col == end_col:
+                # Single column
+                cell = ws[f'{start_letter}{row}']
+                cell.value = elem['text']
+                cell.font = Font(size=10)
+                
+                # Right align if numeric
+                if self._is_numeric(elem['text']) or '$' in elem['text']:
+                    cell.alignment = Alignment(horizontal='right', vertical='center')
+                else:
+                    cell.alignment = Alignment(horizontal='left', vertical='center')
             else:
-                cell.alignment = Alignment(horizontal='left', vertical='center')
+                # Merged columns
+                self._create_merged_cell(ws, row, start_letter, end_letter, elem['text'],
+                                       Font(size=10),
+                                       Alignment(horizontal='left', vertical='center'))
                 
     def _create_default_row(self, ws, elements: List[Dict], row: int, page_width: float):
         """Create default row by positioning elements based on X coordinates"""
@@ -792,6 +1181,11 @@ class IntelligentPDFReader:
             
         current_row = start_row
         
+        # Get table complexity for advanced layout
+        complexity = table_data.get('complexity', 'simple')
+        num_cols = table_data.get('num_cols', 0)
+        has_headers = table_data.get('has_headers', False)
+        
         # Create table with proper column alignment spanning A-H
         for row_idx, row_data in enumerate(table_rows):
             # Clean row data - remove empty cells
@@ -801,26 +1195,12 @@ class IntelligentPDFReader:
                 continue
                 
             # Distribute columns across A-H based on number of actual columns
-            num_cols = len(cleaned_row)
-            if num_cols == 0:
+            num_cols_actual = len(cleaned_row)
+            if num_cols_actual == 0:
                 continue
                 
-            # Calculate column distribution to span A-H (8 columns total)
-            if num_cols == 1:
-                # Single column spans all
-                col_positions = [(1, 8)]  # A-H
-            elif num_cols == 2:
-                # Two columns split evenly
-                col_positions = [(1, 4), (5, 8)]  # A-D, E-H
-            elif num_cols == 3:
-                # Three columns
-                col_positions = [(1, 3), (4, 5), (6, 8)]  # A-C, D-E, F-H
-            elif num_cols == 4:
-                # Four columns
-                col_positions = [(1, 2), (3, 4), (5, 6), (7, 8)]  # A-B, C-D, E-F, G-H
-            else:
-                # More than 4 columns - use individual columns
-                col_positions = [(i+1, i+1) for i in range(min(num_cols, 8))]
+            # Enhanced column distribution based on complexity
+            col_positions = self._calculate_optimal_column_layout(num_cols_actual, complexity, has_headers, row_idx)
                 
             # Create cells for each column
             for col_idx, cell_value in enumerate(cleaned_row):
@@ -840,19 +1220,42 @@ class IntelligentPDFReader:
                     self._create_merged_cell(ws, current_row, start_letter, end_letter, cell_value)
                     cell = ws[f'{start_letter}{current_row}']
                 
-                # Apply formatting
+                # Apply formatting using extracted colors
+                page_colors = layout_info.get('colors', {}).get('table_colors', {})
+                
                 if row_idx == 0:  # Header row
-                    cell.font = Font(size=10, bold=True, color='FFFFFFFF')
-                    cell.fill = PatternFill(start_color='FF4472C4', end_color='FF4472C4', fill_type='solid')
+                    header_text_color = page_colors.get('header_text')
+                    header_bg_color = page_colors.get('header_bg')
+                    
+                    # Only apply colors if they exist in PDF
+                    if header_text_color:
+                        cell.font = Font(size=10, bold=True, color=header_text_color)
+                    else:
+                        cell.font = Font(size=10, bold=True)  # Default black text
+                        
+                    if header_bg_color:
+                        cell.fill = PatternFill(start_color=header_bg_color, end_color=header_bg_color, fill_type='solid')
+                    # No fill if no background color in PDF
+                    
                     cell.alignment = Alignment(horizontal='center', vertical='center')
                 else:  # Data row
-                    cell.font = Font(size=10)
+                    data_text_color = page_colors.get('data_text')
                     
-                    # Alternating row colors
-                    if row_idx % 2 == 0:
-                        cell.fill = PatternFill(start_color='FFFFFFFF', end_color='FFFFFFFF', fill_type='solid')
+                    # Only apply text color if it exists in PDF
+                    if data_text_color:
+                        cell.font = Font(size=10, color=data_text_color)
                     else:
-                        cell.fill = PatternFill(start_color='FFF8F8F8', end_color='FFF8F8F8', fill_type='solid')
+                        cell.font = Font(size=10)  # Default black text
+                    
+                    # Only apply alternating colors if they exist in PDF
+                    if row_idx % 2 == 0:
+                        primary_bg = page_colors.get('data_bg_primary')
+                        if primary_bg:
+                            cell.fill = PatternFill(start_color=primary_bg, end_color=primary_bg, fill_type='solid')
+                    else:
+                        alternate_bg = page_colors.get('data_bg_alternate')
+                        if alternate_bg:
+                            cell.fill = PatternFill(start_color=alternate_bg, end_color=alternate_bg, fill_type='solid')
                         
                     # Smart alignment
                     if self._is_numeric(cell_value) or '$' in cell_value:
@@ -860,19 +1263,74 @@ class IntelligentPDFReader:
                     else:
                         cell.alignment = Alignment(horizontal='left', vertical='center')
                         
-                # Add borders to all cells in the range
-                for col in range(start_col, end_col + 1):
-                    border_cell = ws[f'{get_column_letter(col)}{current_row}']
-                    border_cell.border = Border(
-                        left=Side(style='thin', color='FFE0E0E0'),
-                        right=Side(style='thin', color='FFE0E0E0'),
-                        top=Side(style='thin', color='FFE0E0E0'),
-                        bottom=Side(style='thin', color='FFE0E0E0')
-                    )
+                # Only add borders if border color exists in PDF
+                border_color = page_colors.get('border_color')
+                if border_color:
+                    for col in range(start_col, end_col + 1):
+                        border_cell = ws[f'{get_column_letter(col)}{current_row}']
+                        border_cell.border = Border(
+                            left=Side(style='thin', color=border_color),
+                            right=Side(style='thin', color=border_color),
+                            top=Side(style='thin', color=border_color),
+                            bottom=Side(style='thin', color=border_color)
+                        )
                 
             current_row += 1
             
         return current_row
+    
+    def _calculate_optimal_column_layout(self, num_cols: int, complexity: str, has_headers: bool, row_idx: int) -> List[Tuple[int, int]]:
+        """Calculate optimal column layout based on table complexity and content"""
+        
+        if complexity == 'complex':
+            # For complex tables, use more sophisticated distribution with wider spans
+            if num_cols <= 8:
+                # Use all available columns efficiently with wider spans
+                if num_cols == 1:
+                    return [(1, 8)]  # A-H (full width)
+                elif num_cols == 2:
+                    return [(1, 4), (5, 8)]  # A-D, E-H (half width each)
+                elif num_cols == 3:
+                    return [(1, 2), (3, 5), (6, 8)]  # A-B, C-E, F-H (wider spans)
+                elif num_cols == 4:
+                    return [(1, 2), (3, 4), (5, 6), (7, 8)]  # A-B, C-D, E-F, G-H
+                elif num_cols == 5:
+                    return [(1, 1), (2, 3), (4, 5), (6, 7), (8, 8)]  # A, B-C, D-E, F-G, H
+                elif num_cols == 6:
+                    return [(1, 1), (2, 2), (3, 4), (5, 6), (7, 7), (8, 8)]  # A, B, C-D, E-F, G, H
+                elif num_cols == 7:
+                    return [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 8)]  # A, B, C, D, E, F, G-H
+                else:
+                    return [(i+1, i+1) for i in range(min(num_cols, 8))]
+            else:
+                # For tables with more than 8 columns, use individual columns
+                return [(i+1, i+1) for i in range(min(num_cols, 8))]
+                
+        elif complexity == 'medium':
+            # For medium complexity, use balanced distribution
+            if num_cols == 1:
+                return [(1, 8)]  # A-H
+            elif num_cols == 2:
+                return [(1, 4), (5, 8)]  # A-D, E-H
+            elif num_cols == 3:
+                return [(1, 2), (3, 5), (6, 8)]  # A-B, C-E, F-H
+            elif num_cols == 4:
+                return [(1, 2), (3, 4), (5, 6), (7, 8)]  # A-B, C-D, E-F, G-H
+            else:
+                return [(i+1, i+1) for i in range(min(num_cols, 8))]
+                
+        else:  # simple
+            # For simple tables, use basic distribution
+            if num_cols == 1:
+                return [(1, 8)]  # A-H
+            elif num_cols == 2:
+                return [(1, 4), (5, 8)]  # A-D, E-H
+            elif num_cols == 3:
+                return [(1, 2), (3, 5), (6, 8)]  # A-B, C-E, F-H
+            elif num_cols == 4:
+                return [(1, 2), (3, 4), (5, 6), (7, 8)]  # A-B, C-D, E-F, G-H
+            else:
+                return [(i+1, i+1) for i in range(min(num_cols, 8))]
     
     def _is_numeric(self, text: str) -> bool:
         """Check if text is numeric"""

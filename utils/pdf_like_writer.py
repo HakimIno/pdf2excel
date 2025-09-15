@@ -10,7 +10,7 @@ using the Intelligent PDF Reader system.
 
 import os
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
 try:
@@ -145,29 +145,102 @@ class PDFLikeWriter:
             if table_data:
                 current_row += 1  # Space before table
                 
-                # Add table
+                # Add table using extracted colors
+                page_colors = page_content.get('colors', {}).get('table_colors', {})
+                
+                # Use intelligent column layout for full width usage
                 for row_idx, row_data in enumerate(table_data):
-                    for col_idx, cell_value in enumerate(row_data[:8], 1):
-                        cell = ws.cell(row=current_row, column=col_idx, value=str(cell_value) if cell_value else "")
-                        
-                        if row_idx == 0:  # Header
-                            cell.font = Font(size=10, bold=True, color='FFFFFFFF')
-                            cell.fill = PatternFill(start_color='FF4472C4', end_color='FF4472C4', fill_type='solid')
-                        else:
-                            cell.font = Font(size=10)
+                    # Clean row data - remove empty cells
+                    cleaned_row = [str(cell).strip() for cell in row_data if str(cell).strip()]
+                    
+                    if not cleaned_row:  # Skip completely empty rows
+                        continue
+                    
+                    # Calculate optimal column distribution to span A-H
+                    num_cols = len(cleaned_row)
+                    col_positions = self._calculate_optimal_column_layout(num_cols)
+                    
+                    # Create cells with proper column distribution
+                    for col_idx, cell_value in enumerate(cleaned_row):
+                        if col_idx >= len(col_positions):
+                            break
                             
+                        start_col, end_col = col_positions[col_idx]
+                        start_letter = get_column_letter(start_col)
+                        end_letter = get_column_letter(end_col)
+                        
+                        if start_col == end_col:
+                            # Single column
+                            cell = ws[f'{start_letter}{current_row}']
+                            cell.value = cell_value
+                        else:
+                            # Merged columns
+                            ws.merge_cells(f'{start_letter}{current_row}:{end_letter}{current_row}')
+                            cell = ws[f'{start_letter}{current_row}']
+                            cell.value = cell_value
+                        
+                        # Apply formatting
+                        if row_idx == 0:  # Header
+                            header_text_color = page_colors.get('header_text')
+                            header_bg_color = page_colors.get('header_bg')
+                            
+                            # Only apply colors if they exist in PDF
+                            if header_text_color:
+                                cell.font = Font(size=10, bold=True, color=header_text_color)
+                            else:
+                                cell.font = Font(size=10, bold=True)  # Default black text
+                                
+                            if header_bg_color:
+                                cell.fill = PatternFill(start_color=header_bg_color, end_color=header_bg_color, fill_type='solid')
+                            # No fill if no background color in PDF
+                        else:
+                            data_text_color = page_colors.get('data_text')
+                            
+                            # Only apply text color if it exists in PDF
+                            if data_text_color:
+                                cell.font = Font(size=10, color=data_text_color)
+                            else:
+                                cell.font = Font(size=10)  # Default black text
+                        
                         cell.alignment = Alignment(horizontal='center', vertical='center')
-                        cell.border = Border(
-                            left=Side(style='thin', color='FFE0E0E0'),
-                            right=Side(style='thin', color='FFE0E0E0'),
-                            top=Side(style='thin', color='FFE0E0E0'),
-                            bottom=Side(style='thin', color='FFE0E0E0')
-                        )
+                        
+                        # Only add borders if border color exists in PDF
+                        border_color = page_colors.get('border_color')
+                        if border_color:
+                            for col in range(start_col, end_col + 1):
+                                border_cell = ws[f'{get_column_letter(col)}{current_row}']
+                                border_cell.border = Border(
+                                    left=Side(style='thin', color=border_color),
+                                    right=Side(style='thin', color=border_color),
+                                    top=Side(style='thin', color=border_color),
+                                    bottom=Side(style='thin', color=border_color)
+                                )
                 current_row += 1
                 
-        # Set column widths
-        for i in range(1, 9):
-            ws.column_dimensions[get_column_letter(i)].width = 15
+        # Set column widths to ensure full width usage - match the example layout
+        column_widths = [25, 30, 15, 20, 20, 20, 20, 20]  # Optimized widths for payroll statement
+        for i, width in enumerate(column_widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = width
+    
+    def _calculate_optimal_column_layout(self, num_cols: int) -> List[Tuple[int, int]]:
+        """Calculate optimal column layout to span A-H efficiently - optimized for payroll statements"""
+        if num_cols == 1:
+            return [(1, 8)]  # A-H (full width)
+        elif num_cols == 2:
+            return [(1, 4), (5, 8)]  # A-D, E-H (half width each)
+        elif num_cols == 3:
+            return [(1, 2), (3, 5), (6, 8)]  # A-B, C-E, F-H (balanced)
+        elif num_cols == 4:
+            return [(1, 2), (3, 4), (5, 6), (7, 8)]  # A-B, C-D, E-F, G-H
+        elif num_cols == 5:
+            # Optimized for payroll statements: Category, Deduction Type, Rate, Current, Year to Date
+            return [(1, 1), (2, 2), (3, 3), (4, 5), (6, 8)]  # A, B, C, D-E, F-H
+        elif num_cols == 6:
+            return [(1, 1), (2, 2), (3, 3), (4, 4), (5, 6), (7, 8)]  # A, B, C, D, E-F, G-H
+        elif num_cols == 7:
+            return [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 8)]  # A, B, C, D, E, F, G-H
+        else:
+            return [(i+1, i+1) for i in range(min(num_cols, 8))]
             
     def _write_text_format(self, pdf_data: Dict[str, Any], output_path: str) -> bool:
         """Fallback to text format if Excel not available"""

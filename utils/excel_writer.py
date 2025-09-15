@@ -38,6 +38,103 @@ except ImportError as e:
     print("Install with: pip install openpyxl")
 
 
+class ColorManager:
+    """
+    Manages colors extracted from PDF and provides Excel-compatible colors
+    """
+    def __init__(self, pdf_colors: Dict[str, Any] = None):
+        """Initialize with PDF colors"""
+        self.pdf_colors = pdf_colors or {}
+        # Professional color scheme as fallback
+        self._default_colors = {
+            'header_bg': 'FF1E3A8A',      # Professional blue
+            'header_text': 'FFFFFFFF',    # White
+            'title_text': 'FF1F2937',     # Dark gray
+            'section_text': 'FF374151',   # Medium gray
+            'table_title_bg': 'FFF1F5F9', # Very light blue-gray
+            'table_title_text': 'FF475569', # Medium gray
+            'data_text': 'FF1F2937',      # Dark gray
+            'accent_color': 'FF3B82F6'    # Bright blue
+        }
+    
+    def get_header_colors(self) -> tuple:
+        """Get header background and text colors"""
+        table_colors = self.pdf_colors.get('table_colors', {})
+        bg_color = table_colors.get('header_bg', self._default_colors['header_bg'])
+        text_color = table_colors.get('header_text', self._default_colors['header_text'])
+        
+        # Ensure good contrast
+        if self._is_light_color(bg_color):
+            text_color = self._default_colors['title_text']  # Dark text on light bg
+        
+        return bg_color, text_color
+    
+    def get_title_color(self) -> str:
+        """Get title text color"""
+        table_colors = self.pdf_colors.get('table_colors', {})
+        data_text = table_colors.get('data_text')
+        
+        if data_text and self._is_readable_color(data_text):
+            return data_text
+        
+        # Fallback to professional color
+        return self._default_colors['title_text']
+    
+    def get_section_color(self) -> str:
+        """Get section header color"""
+        table_colors = self.pdf_colors.get('table_colors', {})
+        data_text = table_colors.get('data_text')
+        
+        if data_text and self._is_readable_color(data_text):
+            return data_text
+            
+        return self._default_colors['section_text']
+    
+    def get_table_title_colors(self) -> tuple:
+        """Get table title background and text colors"""
+        table_colors = self.pdf_colors.get('table_colors', {})
+        
+        # Use subtle background color
+        bg_color = table_colors.get('data_bg_alternate', self._default_colors['table_title_bg'])
+        
+        # Ensure background is light enough for table titles
+        if not self._is_light_color(bg_color):
+            bg_color = self._default_colors['table_title_bg']
+        
+        # Use readable text color
+        text_color = table_colors.get('data_text', self._default_colors['table_title_text'])
+        if not self._is_readable_color(text_color):
+            text_color = self._default_colors['table_title_text']
+        
+        return bg_color, text_color
+    
+    def _is_light_color(self, hex_color: str) -> bool:
+        """Check if color is light (suitable for backgrounds)"""
+        try:
+            if len(hex_color) >= 8:
+                r = int(hex_color[2:4], 16)
+                g = int(hex_color[4:6], 16)
+                b = int(hex_color[6:8], 16)
+                brightness = (r * 299 + g * 587 + b * 114) / 1000
+                return brightness > 180
+        except:
+            pass
+        return False
+    
+    def _is_readable_color(self, hex_color: str) -> bool:
+        """Check if color is readable for text"""
+        try:
+            if len(hex_color) >= 8:
+                r = int(hex_color[2:4], 16)
+                g = int(hex_color[4:6], 16)
+                b = int(hex_color[6:8], 16)
+                brightness = (r * 299 + g * 587 + b * 114) / 1000
+                return brightness < 150  # Dark enough to read
+        except:
+            pass
+        return False
+
+
 class ExcelWriter:
     """
     Excel file writer with formatting and multi-sheet support
@@ -53,6 +150,7 @@ class ExcelWriter:
     def __init__(self):
         """Initialize Excel writer"""
         self.logger = logging.getLogger(__name__)
+        self.color_manager = None
         
         if not EXCEL_LIBS_AVAILABLE:
             self.logger.error("Excel libraries not available")
@@ -72,6 +170,15 @@ class ExcelWriter:
             return self._write_fallback_format(pdf_data, output_path)
             
         try:
+            # Initialize color manager with PDF colors
+            pdf_colors = {}
+            if 'pages' in pdf_data and pdf_data['pages']:
+                # Get colors from first page (assuming consistent colors)
+                first_page = pdf_data['pages'][0]
+                pdf_colors = first_page.get('colors', {})
+            
+            self.color_manager = ColorManager(pdf_colors)
+            
             # Create workbook
             wb = Workbook()
             
@@ -96,7 +203,7 @@ class ExcelWriter:
             self.logger.error(f"Error writing Excel file: {str(e)}")
             return False
             
-    def _create_text_sheet(self, wb: Workbook, pdf_data: Dict[str, Any]):
+    def _create_text_sheet(self, wb, pdf_data: Dict[str, Any]):
         """Create sheet for extracted text"""
         ws = wb.create_sheet("Document_Text")
         
@@ -343,9 +450,14 @@ class ExcelWriter:
         self._auto_size_columns(ws)
         
     def _style_header_row(self, ws, row_num: int, col_count: int):
-        """Apply header styling to a row"""
-        header_font = Font(bold=True, color="FFFFFF")
-        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        """Apply header styling to a row using extracted colors"""
+        if self.color_manager:
+            bg_color, text_color = self.color_manager.get_header_colors()
+        else:
+            bg_color, text_color = "FF366092", "FFFFFFFF"
+            
+        header_font = Font(bold=True, color=text_color)
+        header_fill = PatternFill(start_color=bg_color, end_color=bg_color, fill_type="solid")
         
         for col in range(1, col_count + 1):
             cell = ws.cell(row=row_num, column=col)
@@ -354,21 +466,39 @@ class ExcelWriter:
             cell.alignment = Alignment(horizontal="center", vertical="center")
             
     def _style_title(self, ws, cell_ref: str):
-        """Style title cell"""
+        """Style title cell using extracted colors"""
         cell = ws[cell_ref]
-        cell.font = Font(size=16, bold=True, color="2F4F4F")
+        
+        if self.color_manager:
+            title_color = self.color_manager.get_title_color()
+        else:
+            title_color = "FF2F4F4F"
+            
+        cell.font = Font(size=16, bold=True, color=title_color)
         cell.alignment = Alignment(horizontal="center", vertical="center")
         
     def _style_section_header(self, ws, row_num: int):
-        """Style section header"""
+        """Style section header using extracted colors"""
         cell = ws.cell(row=row_num, column=1)
-        cell.font = Font(bold=True, size=12, color="2F4F4F")
+        
+        if self.color_manager:
+            section_color = self.color_manager.get_section_color()
+        else:
+            section_color = "FF2F4F4F"
+            
+        cell.font = Font(bold=True, size=12, color=section_color)
         
     def _style_table_title(self, ws, row_num: int):
-        """Style table title"""
+        """Style table title using extracted colors"""
         cell = ws.cell(row=row_num, column=1)
-        cell.font = Font(bold=True, color="2F4F4F")
-        cell.fill = PatternFill(start_color="E6E6FA", end_color="E6E6FA", fill_type="solid")
+        
+        if self.color_manager:
+            bg_color, text_color = self.color_manager.get_table_title_colors()
+        else:
+            bg_color, text_color = "FFE6E6FA", "FF2F4F4F"
+            
+        cell.font = Font(bold=True, color=text_color)
+        cell.fill = PatternFill(start_color=bg_color, end_color=bg_color, fill_type="solid")
         
     def _format_as_table(self, ws, row_count: int, col_count: int, table_name: str, start_row: int = 1):
         """Format range as Excel table"""
