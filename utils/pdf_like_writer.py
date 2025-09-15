@@ -158,6 +158,7 @@ class PDFLikeWriter:
                     
                     # Calculate optimal column distribution to span A-H
                     num_cols = len(cleaned_row)
+                    # Use complex layout for better full-width utilization
                     col_positions = self._calculate_optimal_column_layout(num_cols)
                     
                     # Create cells with proper column distribution
@@ -217,8 +218,8 @@ class PDFLikeWriter:
                                 )
                 current_row += 1
                 
-        # Set column widths to ensure full width usage - match the example layout
-        column_widths = [25, 30, 15, 20, 20, 20, 20, 20]  # Optimized widths for payroll statement
+        # Set column widths to ensure full width usage - optimized for full width table display
+        column_widths = [30, 35, 20, 25, 25, 25, 25, 25]  # Optimized widths for full width payroll statement
         for i, width in enumerate(column_widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = width
     
@@ -234,11 +235,13 @@ class PDFLikeWriter:
             return [(1, 2), (3, 4), (5, 6), (7, 8)]  # A-B, C-D, E-F, G-H
         elif num_cols == 5:
             # Optimized for payroll statements: Category, Deduction Type, Rate, Current, Year to Date
-            return [(1, 1), (2, 2), (3, 3), (4, 5), (6, 8)]  # A, B, C, D-E, F-H
+            return [(1, 1), (2, 3), (4, 4), (5, 6), (7, 8)]  # A, B-C, D, E-F, G-H
         elif num_cols == 6:
             return [(1, 1), (2, 2), (3, 3), (4, 4), (5, 6), (7, 8)]  # A, B, C, D, E-F, G-H
         elif num_cols == 7:
             return [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 8)]  # A, B, C, D, E, F, G-H
+        elif num_cols == 8:
+            return [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 7), (8, 8)]  # A, B, C, D, E, F, G, H
         else:
             return [(i+1, i+1) for i in range(min(num_cols, 8))]
             

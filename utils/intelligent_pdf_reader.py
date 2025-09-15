@@ -618,16 +618,16 @@ class IntelligentPDFReader:
             elif complexity == 'medium' and max_complexity == 'simple':
                 max_complexity = 'medium'
         
-        # Set column widths based on complexity - optimized for professional table layout
+        # Set column widths based on complexity - optimized for full width table display
         if max_complexity == 'complex':
-            # For complex tables (like payroll statements), use optimized widths
-            column_widths = [25, 30, 15, 20, 20, 20, 20, 20]  # Optimized for payroll statements
+            # For complex tables (like payroll statements), use wider widths to fill full page
+            column_widths = [30, 35, 20, 25, 25, 25, 25, 25]  # Optimized for full width payroll statements
         elif max_complexity == 'medium':
-            # For medium complexity, use balanced widths
-            column_widths = [20, 25, 15, 18, 18, 18, 18, 18]
+            # For medium complexity, use balanced widths with full coverage
+            column_widths = [25, 30, 18, 22, 22, 22, 22, 22]
         else:
-            # For simple tables, use uniform widths
-            column_widths = [18, 20, 15, 16, 16, 16, 16, 16]
+            # For simple tables, use uniform widths with full coverage
+            column_widths = [22, 25, 18, 20, 20, 20, 20, 20]
         
         for i, width in enumerate(column_widths, 1):
             ws.column_dimensions[get_column_letter(i)].width = width
@@ -1280,34 +1280,33 @@ class IntelligentPDFReader:
         return current_row
     
     def _calculate_optimal_column_layout(self, num_cols: int, complexity: str, has_headers: bool, row_idx: int) -> List[Tuple[int, int]]:
-        """Calculate optimal column layout based on table complexity and content"""
+        """Calculate optimal column layout based on table complexity and content - optimized for full width usage"""
         
         if complexity == 'complex':
-            # For complex tables, use more sophisticated distribution with wider spans
-            if num_cols <= 8:
-                # Use all available columns efficiently with wider spans
-                if num_cols == 1:
-                    return [(1, 8)]  # A-H (full width)
-                elif num_cols == 2:
-                    return [(1, 4), (5, 8)]  # A-D, E-H (half width each)
-                elif num_cols == 3:
-                    return [(1, 2), (3, 5), (6, 8)]  # A-B, C-E, F-H (wider spans)
-                elif num_cols == 4:
-                    return [(1, 2), (3, 4), (5, 6), (7, 8)]  # A-B, C-D, E-F, G-H
-                elif num_cols == 5:
-                    return [(1, 1), (2, 3), (4, 5), (6, 7), (8, 8)]  # A, B-C, D-E, F-G, H
-                elif num_cols == 6:
-                    return [(1, 1), (2, 2), (3, 4), (5, 6), (7, 7), (8, 8)]  # A, B, C-D, E-F, G, H
-                elif num_cols == 7:
-                    return [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 8)]  # A, B, C, D, E, F, G-H
-                else:
-                    return [(i+1, i+1) for i in range(min(num_cols, 8))]
+            # For complex tables (like payroll statements), use full width distribution
+            if num_cols == 1:
+                return [(1, 8)]  # A-H (full width)
+            elif num_cols == 2:
+                return [(1, 4), (5, 8)]  # A-D, E-H (half width each)
+            elif num_cols == 3:
+                return [(1, 2), (3, 5), (6, 8)]  # A-B, C-E, F-H (balanced)
+            elif num_cols == 4:
+                return [(1, 2), (3, 4), (5, 6), (7, 8)]  # A-B, C-D, E-F, G-H
+            elif num_cols == 5:
+                # Optimized for payroll statements: Category, Deduction Type, Rate, Current, Year to Date
+                return [(1, 1), (2, 3), (4, 4), (5, 6), (7, 8)]  # A, B-C, D, E-F, G-H
+            elif num_cols == 6:
+                return [(1, 1), (2, 2), (3, 4), (5, 5), (6, 7), (8, 8)]  # A, B, C-D, E, F-G, H
+            elif num_cols == 7:
+                return [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 8)]  # A, B, C, D, E, F, G-H
+            elif num_cols == 8:
+                return [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 7), (8, 8)]  # A, B, C, D, E, F, G, H
             else:
-                # For tables with more than 8 columns, use individual columns
+                # For more than 8 columns, use individual columns but ensure we use all 8 available
                 return [(i+1, i+1) for i in range(min(num_cols, 8))]
                 
         elif complexity == 'medium':
-            # For medium complexity, use balanced distribution
+            # For medium complexity, use balanced distribution with full width
             if num_cols == 1:
                 return [(1, 8)]  # A-H
             elif num_cols == 2:
@@ -1316,11 +1315,13 @@ class IntelligentPDFReader:
                 return [(1, 2), (3, 5), (6, 8)]  # A-B, C-E, F-H
             elif num_cols == 4:
                 return [(1, 2), (3, 4), (5, 6), (7, 8)]  # A-B, C-D, E-F, G-H
+            elif num_cols == 5:
+                return [(1, 1), (2, 3), (4, 4), (5, 6), (7, 8)]  # A, B-C, D, E-F, G-H
             else:
                 return [(i+1, i+1) for i in range(min(num_cols, 8))]
                 
         else:  # simple
-            # For simple tables, use basic distribution
+            # For simple tables, use basic distribution with full width
             if num_cols == 1:
                 return [(1, 8)]  # A-H
             elif num_cols == 2:
@@ -1329,6 +1330,8 @@ class IntelligentPDFReader:
                 return [(1, 2), (3, 5), (6, 8)]  # A-B, C-E, F-H
             elif num_cols == 4:
                 return [(1, 2), (3, 4), (5, 6), (7, 8)]  # A-B, C-D, E-F, G-H
+            elif num_cols == 5:
+                return [(1, 1), (2, 3), (4, 4), (5, 6), (7, 8)]  # A, B-C, D, E-F, G-H
             else:
                 return [(i+1, i+1) for i in range(min(num_cols, 8))]
     
