@@ -1,0 +1,19 @@
+# Core PDF processing libraries
+PyPDF2
+pdfplumber
+
+# Excel processing
+openpyxl
+pandas
+
+# Image processing
+Pillow
+
+# Progress bars and utilities
+tqdm
+
+# Optional: Advanced table extraction
+# camelot-py[cv]  # Skip for now due to compatibility issues
+
+# Date/time handling
+python-dateutil
